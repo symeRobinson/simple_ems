@@ -532,12 +532,22 @@ Citizen.CreateThread(function()
     end
 end)
 
--- Event to receive updated data from the server
 RegisterNetEvent('ems:receivePlayersData')
 AddEventHandler('ems:receivePlayersData', function(data)
     playersData = data
+
+    -- Update local injuries and conditions if the data is for the local player
+    local playerId = GetPlayerServerId(PlayerId())
+    if playersData[playerId] then
+        injuries = playersData[playerId].injuries
+        conditions = playersData[playerId].conditions
+    end
 end)
 
+
+Citizen.CreateThread(function()
+    TriggerServerEvent('ems:requestPlayersData')
+end)
 -- Event handlers for treatments applied by another player
 RegisterNetEvent('ems:treatmentApplied')
 AddEventHandler('ems:treatmentApplied', function(treatmentName)
@@ -548,6 +558,119 @@ AddEventHandler('ems:treatmentApplied', function(treatmentName)
     end
 end)
 
+function applyTreatmentToPatient(targetPlayerId, treatmentName)
+    local treatmentConfig = Config.Treatments[treatmentName]
+    if not treatmentConfig then
+        ShowNotification("Invalid treatment.")
+        return
+    end
+
+    -- If the treatment addresses trauma, prompt for injury location
+    if treatmentConfig.type == "Wound Care" then
+        -- Retrieve patient data
+        local patientData = playersData[targetPlayerId]
+        if not patientData then
+            ShowNotification("No patient data available.")
+            return
+        end
+
+        -- Collect injuries that haven't been resolved
+        local injuryOptions = {}
+        for i, injury in ipairs(patientData.injuries) do
+            if not injury.resolved and injury.found then
+                local injuryConfig = Config.Injuries[injury.injury]
+                table.insert(injuryOptions, { index = i, label = injuryConfig.displayName .. " at " .. injury.location })
+            end
+        end
+
+        if #injuryOptions == 0 then
+            ShowNotification("No injuries found to treat.")
+            return
+        end
+
+        -- Prompt player to select an injury
+        local selectedInjury = selectInjuryMenu(injuryOptions)
+        if selectedInjury then
+            -- Send treatment application request to the server with injury index
+            TriggerServerEvent('ems:applyTreatment', targetPlayerId, treatmentName, selectedInjury.index)
+        end
+    else
+        -- For other treatments, send the request directly
+        TriggerServerEvent('ems:applyTreatment', targetPlayerId, treatmentName)
+    end
+end
+
+function selectInjuryMenu(injuryOptions)
+    -- Create a temporary menu
+    WarMenu.CreateMenu('injurySelectionMenu', 'Select Injury')
+
+    while true do
+        if WarMenu.IsMenuOpened('injurySelectionMenu') then
+            for _, injuryOption in ipairs(injuryOptions) do
+                if WarMenu.Button(injuryOption.label) then
+                    WarMenu.CloseMenu()
+                    return injuryOption
+                end
+            end
+            if WarMenu.Button('Cancel') then
+                WarMenu.CloseMenu()
+                return nil
+            end
+            WarMenu.Display()
+        else
+            WarMenu.OpenMenu('injurySelectionMenu')
+        end
+        Citizen.Wait(0)
+    end
+end
+
+RegisterNetEvent('ems:updateInjuries')
+AddEventHandler('ems:updateInjuries', function(updatedInjuries)
+    injuries = updatedInjuries
+end)
+
+
+function assessArea(targetPlayerId, areaKey)
+    -- Retrieve patient data
+    local patientData = playersData[targetPlayerId]
+    if not patientData then
+        ShowNotification("No patient data available.")
+        return
+    end
+
+    -- Check for injuries or conditions related to the assessment area
+    local findings = {}
+
+    -- Check injuries
+    for _, injury in ipairs(patientData.injuries) do
+        local injuryConfig = Config.Injuries[injury.injury]
+        if injuryConfig and injuryConfig.assessmentArea == areaKey and not injury.found then
+            table.insert(findings, injuryConfig.displayName .. " (" .. injury.severity .. ") at " .. injury.location)
+            injury.found = true -- Mark as found
+        end
+    end
+
+    -- Check conditions
+    for _, condition in ipairs(patientData.conditions) do
+        local conditionConfig = Config.Conditions[condition.condition]
+        if conditionConfig and conditionConfig.assessmentArea == areaKey and not condition.found then
+            table.insert(findings, conditionConfig.displayName .. " (" .. condition.severity .. ")")
+            condition.found = true -- Mark as found
+        end
+    end
+
+    if #findings > 0 then
+        -- Display findings to the player
+        for _, finding in ipairs(findings) do
+            ShowNotification("Found: " .. finding)
+        end
+
+        -- Update patient data on the server
+        TriggerServerEvent('ems:updatePatientFindings', targetPlayerId, patientData)
+    else
+        ShowNotification("No abnormal findings in " .. Config.AssessmentAreas[areaKey] .. ".")
+    end
+end
 -- Initialize menus
 Citizen.CreateThread(function()
     -- Main Menus
@@ -582,6 +705,7 @@ Citizen.CreateThread(function()
                 WarMenu.CloseMenu()
             end
             WarMenu.Display()
+
         -- Certification Menu
         elseif WarMenu.IsMenuOpened('certificationMenu') then
             local certLevels = { "EMR", "EMT", "Paramedic" }
@@ -598,6 +722,7 @@ Citizen.CreateThread(function()
                 WarMenu.OpenMenu('emsMainMenu')
             end
             WarMenu.Display()
+
         -- Enable Simulation Menu
         elseif WarMenu.IsMenuOpened('enableSimulationMenu') then
             if WarMenu.MenuButton('View Vital Signs', 'vitalSignsMenu') then end
@@ -608,23 +733,23 @@ Citizen.CreateThread(function()
                 WarMenu.OpenMenu('emsMainMenu')
             end
             WarMenu.Display()
+
         -- View Vital Signs Menu
         elseif WarMenu.IsMenuOpened('vitalSignsMenu') then
             WarMenu.Button('Heart Rate: ' .. vitalSigns.HR .. ' bpm')
             WarMenu.Button('Blood Pressure: ' .. vitalSigns.systolicBP .. '/' .. vitalSigns.diastolicBP .. ' mmHg')
             WarMenu.Button('Respiratory Rate: ' .. vitalSigns.RR .. ' breaths/min')
             WarMenu.Button('Oxygen Saturation: ' .. vitalSigns.SpO2 .. '%')
-            --WarMenu.Button('Mental Status: ' .. (isUnconscious and 'Unconscious' or 'Conscious'))
             if isCardiacArrest then
                 WarMenu.Button('~r~Cardiac Arrest~s~') -- Red text for critical condition
             else
                 WarMenu.Button('Mental Status: ' .. (isUnconscious and 'Unconscious' or 'Conscious'))
             end
-        
             if WarMenu.Button('Back') then
                 WarMenu.OpenMenu('enableSimulationMenu')
             end
             WarMenu.Display()
+
         -- Injury Management Menu
         elseif WarMenu.IsMenuOpened('injuryManagementMenu') then
             if WarMenu.MenuButton('Add Injuries', 'addInjuryMenu') then end
@@ -640,6 +765,7 @@ Citizen.CreateThread(function()
                 WarMenu.OpenMenu('enableSimulationMenu')
             end
             WarMenu.Display()
+
         -- Add Injuries Menu
         elseif WarMenu.IsMenuOpened('addInjuryMenu') then
             local injuryNames = {}
@@ -666,6 +792,7 @@ Citizen.CreateThread(function()
                 WarMenu.OpenMenu('injuryManagementMenu')
             end
             WarMenu.Display()
+
         -- Enable Medical Conditions Menu
         elseif WarMenu.IsMenuOpened('enableConditionsMenu') then
             local conditionNames = {}
@@ -688,6 +815,7 @@ Citizen.CreateThread(function()
                 WarMenu.OpenMenu('enableSimulationMenu')
             end
             WarMenu.Display()
+
         -- Remove Medical Condition Menu
         elseif WarMenu.IsMenuOpened('removeConditionsMenu') then
             for i, condition in ipairs(conditions) do
@@ -701,181 +829,33 @@ Citizen.CreateThread(function()
                 WarMenu.OpenMenu('enableSimulationMenu')
             end
             WarMenu.Display()
+
         -- EMS Provider Menu
-    elseif WarMenu.IsMenuOpened('emsProviderMenu') then
-        if WarMenu.MenuButton('Patient Assessment', 'assessmentMenu') then
-            WarMenu.OpenMenu('assessmentMenu')
-        end
-        if WarMenu.MenuButton('Treatments', 'treatmentsMenu') then
-            WarMenu.OpenMenu('treatmentsMenu')
-        end
-        if WarMenu.MenuButton('Inventory', 'inventoryMenu') then
-            WarMenu.OpenMenu('inventoryMenu')
-        end
-        if WarMenu.Button('Close') then
-            WarMenu.CloseMenu()
-        end
-        WarMenu.Display()
-    
-    -- Patient Assessment Menu
-    elseif WarMenu.IsMenuOpened('assessmentMenu') then
-        WarMenu.Button('Heart Rate: ' .. vitalSigns.HR .. ' bpm')
-        WarMenu.Button('Respiratory Rate: ' .. vitalSigns.RR .. ' breaths/min')
-        WarMenu.Button('Blood Pressure: ' .. vitalSigns.systolicBP .. '/' .. vitalSigns.diastolicBP .. ' mmHg')
-        WarMenu.Button('SpO2: ' .. vitalSigns.SpO2 .. '%')
-    
-        if isUnconscious then
-            WarMenu.Button('Mental Status: ~r~Unconscious~s~')
-        else
-            WarMenu.Button('Mental Status: Conscious')
-        end
-    
-        if isCardiacArrest then
-            WarMenu.Button('~r~Cardiac Arrest Active~s~')
-        end
-    
-        if WarMenu.Button('Back') then
-            WarMenu.OpenMenu('emsProviderMenu')
-        end
-        WarMenu.Display()
-    
-    -- EMS Provider Menu
-elseif WarMenu.IsMenuOpened('emsProviderMenu') then
-    if WarMenu.MenuButton('Patient Assessment', 'assessmentMenu') then
-        state.currentViewedPlayer = detectClosestPlayer() -- Set the target player based on proximity
-        if not state.currentViewedPlayer then
-            ShowNotification("~r~No patient nearby.")
-        end
-    end
-    if WarMenu.MenuButton('Treatments', 'treatmentsMenu') then
-        state.currentViewedPlayer = detectClosestPlayer()
-        if not state.currentViewedPlayer then
-            ShowNotification("~r~No patient nearby.")
-        end
-    end
-    if WarMenu.MenuButton('Inventory', 'inventoryMenu') then end
-    if WarMenu.Button('Close') then
-        WarMenu.CloseMenu()
-    end
-    WarMenu.Display()
-
--- Patient Assessment Menu
-elseif WarMenu.IsMenuOpened('assessmentMenu') then
-    if state.currentViewedPlayer then
-        local patientData = playersData[state.currentViewedPlayer]
-        if patientData then
-            WarMenu.Button('Heart Rate: ' .. patientData.vitalSigns.HR .. ' bpm')
-            WarMenu.Button('Respiratory Rate: ' .. patientData.vitalSigns.RR .. ' breaths/min')
-            WarMenu.Button('Blood Pressure: ' .. patientData.vitalSigns.systolicBP .. '/' .. patientData.vitalSigns.diastolicBP .. ' mmHg')
-            WarMenu.Button('SpO2: ' .. patientData.vitalSigns.SpO2 .. '%')
-
-            if patientData.isUnconscious then
-                WarMenu.Button('Mental Status: ~r~Unconscious~s~')
-            else
-                WarMenu.Button('Mental Status: Conscious')
+        elseif WarMenu.IsMenuOpened('emsProviderMenu') then
+            if WarMenu.MenuButton('Patient Assessment', 'assessmentMenu') then
+                state.currentViewedPlayer = detectClosestPlayer()
+                if not state.currentViewedPlayer then
+                    ShowNotification("~r~No patient nearby.")
+                end
             end
-
-            if patientData.isCardiacArrest then
-                WarMenu.Button('~r~Cardiac Arrest Active~s~')
+            if WarMenu.MenuButton('Treatments', 'treatmentsMenu') then
+                state.currentViewedPlayer = detectClosestPlayer()
+                if not state.currentViewedPlayer then
+                    ShowNotification("~r~No patient nearby.")
+                end
             end
+            if WarMenu.MenuButton('Inventory', 'inventoryMenu') then end
+            if WarMenu.Button('Close') then
+                WarMenu.CloseMenu()
+            end
+            WarMenu.Display()
         else
-            WarMenu.Button('~r~No patient data available.~s~')
+            Citizen.Wait(500) -- Pause the thread if no menu is open
         end
-    else
-        WarMenu.Button('~r~No patient selected.~s~')
-    end
-
-    if WarMenu.Button('Back') then
-        WarMenu.OpenMenu('emsProviderMenu')
-    end
-    WarMenu.Display()
-
--- Treatments Menu
-elseif WarMenu.IsMenuOpened('treatmentsMenu') then
-    if state.currentViewedPlayer then
-        if WarMenu.MenuButton('Airway', 'airwayTreatments') then end
-        if WarMenu.MenuButton('Circulation', 'circulationTreatments') then end
-        if WarMenu.MenuButton('Medications', 'medicationTreatments') then end
-        if WarMenu.MenuButton('Completed Treatments', 'completedTreatments') then end
-
-        if WarMenu.Button('Back') then
-            WarMenu.OpenMenu('emsProviderMenu')
-        end
-    else
-        WarMenu.Button('~r~No patient selected.~s~')
-    end
-    WarMenu.Display()
-
--- Airway Treatments Submenu
-elseif WarMenu.IsMenuOpened('airwayTreatments') then
-    for treatmentName, treatmentConfig in pairs(Config.Treatments.Airway) do
-        if WarMenu.Button(treatmentConfig.name) then
-            applyTreatmentToBodyPart(state.currentViewedPlayer, treatmentName, "Airway")
-        end
-    end
-    if WarMenu.Button('Back') then
-        WarMenu.OpenMenu('treatmentsMenu')
-    end
-    WarMenu.Display()
-
--- Circulation Treatments Submenu
-elseif WarMenu.IsMenuOpened('circulationTreatments') then
-    for treatmentName, treatmentConfig in pairs(Config.Treatments.Circulation) do
-        if WarMenu.Button(treatmentConfig.name) then
-            applyTreatmentToBodyPart(state.currentViewedPlayer, treatmentName, "Circulation")
-        end
-    end
-    if WarMenu.Button('Back') then
-        WarMenu.OpenMenu('treatmentsMenu')
-    end
-    WarMenu.Display()
-
--- Medications Submenu
-elseif WarMenu.IsMenuOpened('medicationTreatments') then
-    for treatmentName, treatmentConfig in pairs(Config.Treatments.Medications) do
-        if WarMenu.Button(treatmentConfig.name) then
-            applyTreatmentToBodyPart(state.currentViewedPlayer, treatmentName, "Medications")
-        end
-    end
-    if WarMenu.Button('Back') then
-        WarMenu.OpenMenu('treatmentsMenu')
-    end
-    WarMenu.Display()
-
--- Completed Treatments Submenu
-elseif WarMenu.IsMenuOpened('completedTreatments') then
-    for _, completedTreatment in ipairs(treatmentsApplied) do
-        WarMenu.Button(completedTreatment)
-    end
-    if WarMenu.Button('Back') then
-        WarMenu.OpenMenu('treatmentsMenu')
-    end
-    WarMenu.Display()
-
--- Inventory Menu
-elseif WarMenu.IsMenuOpened('inventoryMenu') then
-    for treatmentName, count in pairs(state.inventory) do
-        local treatmentConfig = Config.Treatments[treatmentName]
-        if treatmentConfig then
-            WarMenu.Button(treatmentConfig.name .. ': ' .. count)
-        end
-    end
-
-    if WarMenu.Button('Reset Supplies') then
-        initializeInventory()
-        ShowNotification("Supplies have been reset.")
-    end
-
-    if WarMenu.Button('Back') then
-        WarMenu.OpenMenu('emsProviderMenu')
-    end
-    WarMenu.Display()
-        else
-            Citizen.Wait(500)
-        end
-        Citizen.Wait(0)
+        Citizen.Wait(0) -- Keep the thread alive
     end
 end)
+
 local function detectClosestPlayer()
     local playerPed = PlayerPedId()
     local playerCoords = GetEntityCoords(playerPed)
@@ -900,7 +880,7 @@ end
 
 Citizen.CreateThread(function()
     while true do
-        if not WarMenu.IsAnyMenuOpened() and state.isProviderEnabled then
+        if state.isProviderEnabled and not WarMenu.IsAnyMenuOpened() then
             local closestPlayer = detectClosestPlayer()
             if closestPlayer then
                 -- Display interaction prompt
