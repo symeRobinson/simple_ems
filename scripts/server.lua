@@ -22,7 +22,7 @@ end)
 
 -- Event to handle treatments applied by EMS providers
 RegisterNetEvent('ems:applyTreatment')
-AddEventHandler('ems:applyTreatment', function(targetPlayerId, treatmentName)
+AddEventHandler('ems:applyTreatment', function(targetPlayerId, treatmentName, injuryIndex)
     local sourcePlayerId = source
 
     -- Validate treatment
@@ -33,6 +33,24 @@ AddEventHandler('ems:applyTreatment', function(targetPlayerId, treatmentName)
 
     -- Apply treatment to target player
     if playersData[targetPlayerId] then
+        local patientData = playersData[targetPlayerId]
+
+        if injuryIndex then
+            -- Validate injury index
+            local injury = patientData.injuries[injuryIndex]
+            if not injury or injury.resolved == true then
+                print("Invalid injury index provided by player " .. sourcePlayerId)
+                return
+            end
+
+            -- Mark the injury as resolved
+            injury.resolved = true
+            playersData[targetPlayerId] = patientData
+
+            -- Notify target player to update their injuries
+            TriggerClientEvent('ems:updateInjuries', targetPlayerId, patientData.injuries)
+        end
+
         -- Notify target player to apply treatment
         TriggerClientEvent('ems:treatmentApplied', targetPlayerId, treatmentName)
     end
@@ -54,3 +72,15 @@ RegisterCommand('resetPlayerData', function(source, args, rawCommand)
         print("Reset player data for ID: " .. targetId)
     end
 end, true)
+
+RegisterNetEvent('ems:updatePatientFindings')
+AddEventHandler('ems:updatePatientFindings', function(targetPlayerId, updatedData)
+    local sourcePlayerId = source
+    if playersData[targetPlayerId] then
+        playersData[targetPlayerId].injuries = updatedData.injuries
+        playersData[targetPlayerId].conditions = updatedData.conditions
+
+        -- Broadcast updated data to all clients
+        TriggerClientEvent('ems:receivePlayersData', -1, playersData)
+    end
+end)
