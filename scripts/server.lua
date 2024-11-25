@@ -1,58 +1,56 @@
--- server.lua
+local Config = Config or {}
+local playersData = {} -- Data for all players
 
-local onDutyPlayers = {}
+-- Receive player data from client
+RegisterNetEvent('ems:updatePlayerData')
+AddEventHandler('ems:updatePlayerData', function(data)
+    local playerId = source
+    playersData[playerId] = data
 
--- Event to set a player on or off duty
-RegisterNetEvent('ems:setOnDuty')
-AddEventHandler('ems:setOnDuty', function(isOnDuty, selectedUnit, selectedStation)
-    local src = source
-    if isOnDuty then
-        -- Add player to onDutyPlayers list
-        onDutyPlayers[src] = {
-            unit = selectedUnit,
-            station = selectedStation,
-            identifier = GetPlayerIdentifiers(src)[1]  -- Store unique identifier for tracking
-        }
-        TriggerClientEvent('chat:addMessage', -1, { args = { "EMS", GetPlayerName(src) .. " is now on duty as " .. selectedUnit } })
-    else
-        -- Remove player from onDutyPlayers list
-        onDutyPlayers[src] = nil
-        TriggerClientEvent('chat:addMessage', -1, { args = { "EMS", GetPlayerName(src) .. " has gone off duty." } })
+    -- Send updated data to all clients
+    TriggerClientEvent('ems:receivePlayersData', -1, playersData)
+end)
+
+-- Handle player disconnect
+AddEventHandler('playerDropped', function(reason)
+    local playerId = source
+    playersData[playerId] = nil
+
+    -- Update other clients
+    TriggerClientEvent('ems:receivePlayersData', -1, playersData)
+end)
+
+-- Event to handle treatments applied by EMS providers
+RegisterNetEvent('ems:applyTreatment')
+AddEventHandler('ems:applyTreatment', function(targetPlayerId, treatmentName)
+    local sourcePlayerId = source
+
+    -- Validate treatment
+    if not Config.Treatments[treatmentName] then
+        print("Invalid treatment applied by player " .. sourcePlayerId)
+        return
+    end
+
+    -- Apply treatment to target player
+    if playersData[targetPlayerId] then
+        -- Notify target player to apply treatment
+        TriggerClientEvent('ems:treatmentApplied', targetPlayerId, treatmentName)
     end
 end)
 
--- Event to update a civilian's selected data
-RegisterNetEvent('ems:updateCivilianData')
-AddEventHandler('ems:updateCivilianData', function(age, sex, medicalConditions, injuries)
-    local src = source
-    local civilianData = {
-        age = age,
-        sex = sex,
-        medicalConditions = medicalConditions,
-        injuries = injuries
-    }
-    -- Save civilian data (you may wish to save this to a database)
-    onDutyPlayers[src] = civilianData
-    print("Updated civilian data for player: " .. GetPlayerName(src))
+-- Request player data when a client connects
+RegisterNetEvent('ems:requestPlayersData')
+AddEventHandler('ems:requestPlayersData', function()
+    local playerId = source
+    TriggerClientEvent('ems:receivePlayersData', playerId, playersData)
 end)
 
--- Command to list all on-duty players (for admin/testing purposes)
-RegisterCommand('listonduty', function(source, args, rawCommand)
-    local src = source
-    if src == 0 then -- Server console
-        print("On-Duty EMS Players:")
-        for playerId, data in pairs(onDutyPlayers) do
-            print("Player ID: " .. playerId .. ", Unit: " .. (data.unit or "N/A") .. ", Station: " .. (data.station or "N/A"))
-        end
-    else -- In-game command
-        TriggerClientEvent('chat:addMessage', src, { args = { "EMS", "Check console for on-duty players." } })
+-- Debug command to reset a player's data
+RegisterCommand('resetPlayerData', function(source, args, rawCommand)
+    local targetId = tonumber(args[1])
+    if playersData[targetId] then
+        playersData[targetId] = nil
+        TriggerClientEvent('ems:receivePlayersData', -1, playersData)
+        print("Reset player data for ID: " .. targetId)
     end
 end, true)
-
--- Clean up player data when they disconnect
-AddEventHandler('playerDropped', function(reason)
-    local src = source
-    if onDutyPlayers[src] then
-        onDutyPlayers[src] = nil
-    end
-end)
